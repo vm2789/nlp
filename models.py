@@ -187,7 +187,7 @@ def train_logistic_regression(train_exs: List[SentimentExample], feat_extractor:
     rng = random.Random(0)
     for epoch in range(25):
         rng.shuffle(examples)
-        learning_rate = 0.15 / (1.0 + 0.1 * epoch)
+        learning_rate = 1.5e-1 / (1.0 + 1e-1 * epoch)
         for features, label in examples:
             score = sum(weights[index] * value for index, value in features.items())
             # This form avoids overflow for either sign of the score.
