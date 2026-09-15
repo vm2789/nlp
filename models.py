@@ -4,6 +4,8 @@ from sentiment_data import *
 from utils import *
 
 from collections import Counter
+import math
+import random
 
 class FeatureExtractor(object):
     """
@@ -31,23 +33,52 @@ class UnigramFeatureExtractor(FeatureExtractor):
     and any additional preprocessing you want to do.
     """
     def __init__(self, indexer: Indexer):
-        raise Exception("Must be implemented")
+        self.indexer = indexer
+
+    def get_indexer(self):
+        return self.indexer
+
+    def _features(self, sentence):
+        return [word.lower() for word in sentence]
+
+    def extract_features(self, sentence: List[str], add_to_indexer: bool=False) -> Counter:
+        features = Counter()
+        for feature in self._features(sentence):
+            index = self.indexer.add_and_get_index(feature, add=add_to_indexer)
+            if index != -1:
+                features[index] += 1
+        return features
 
 
-class BigramFeatureExtractor(FeatureExtractor):
+class BigramFeatureExtractor(UnigramFeatureExtractor):
     """
     Bigram feature extractor analogous to the unigram one.
     """
-    def __init__(self, indexer: Indexer):
-        raise Exception("Must be implemented")
+    def _features(self, sentence):
+        words = [word.lower() for word in sentence]
+        # Each adjacent pair is an indicator, regardless of repetition.
+        return dict.fromkeys(zip(words, words[1:]))
 
 
-class BetterFeatureExtractor(FeatureExtractor):
+class BetterFeatureExtractor(UnigramFeatureExtractor):
     """
     Better feature extractor...try whatever you can think of!
     """
-    def __init__(self, indexer: Indexer):
-        raise Exception("Must be implemented")
+    def _features(self, sentence):
+        # Keep feature families distinct, including negation-scoped words.
+        words = [word.lower() for word in sentence]
+        features = [("unigram", word) for word in words]
+        features.extend(("bigram", left, right) for left, right in zip(words, words[1:]))
+        negated = False
+        for word in words:
+            if word in {".", ",", "!", "?", ";", ":"}:
+                negated = False
+            elif word in {"not", "no", "never", "n't"} or word.endswith("n't"):
+                negated = True
+            elif negated:
+                features.append(("negated", word))
+        # Binary presence reduces the influence of repeated words.
+        return dict.fromkeys(features)
 
 
 class SentimentClassifier(object):
@@ -76,18 +107,41 @@ class PerceptronClassifier(SentimentClassifier):
     superclass. Hint: you'll probably need this class to wrap both the weight vector and featurizer -- feel free to
     modify the constructor to pass these in.
     """
-    def __init__(self):
-        raise Exception("Must be implemented")
+    def __init__(self, weights, feat_extractor: FeatureExtractor, bias: float=0.0):
+        self.weights = dict(weights)
+        self.feat_extractor = feat_extractor
+        self.bias = bias
+
+    def predict(self, sentence: List[str]) -> int:
+        features = self.feat_extractor.extract_features(sentence)
+        score = self.bias + sum(self.weights.get(index, 0.0) * value
+                                for index, value in features.items())
+        return int(score >= 0.0)
 
 
-class LogisticRegressionClassifier(SentimentClassifier):
+class LogisticRegressionClassifier(PerceptronClassifier):
     """
     Implement this class -- you should at least have init() and implement the predict method from the SentimentClassifier
     superclass. Hint: you'll probably need this class to wrap both the weight vector and featurizer -- feel free to
     modify the constructor to pass these in.
     """
-    def __init__(self):
-        raise Exception("Must be implemented")
+    # A sigmoid probability is >= 0.5 exactly when its linear score is >= 0.
+    # The constructor and binary prediction are inherited from PerceptronClassifier.
+
+
+
+def _training_features(train_exs, feat_extractor):
+    if not train_exs:
+        raise ValueError("Training requires at least one example")
+    examples = []
+    for example in train_exs:
+        if example.label not in (0, 1):
+            raise ValueError("Sentiment labels must be 0 or 1")
+        features = feat_extractor.extract_features(example.words, add_to_indexer=True)
+        # Indexer assigns nonnegative indices; -1 is reserved for the intercept.
+        features[-1] = 1
+        examples.append((features, example.label))
+    return examples
 
 
 def train_perceptron(train_exs: List[SentimentExample], feat_extractor: FeatureExtractor) -> PerceptronClassifier:
@@ -97,7 +151,28 @@ def train_perceptron(train_exs: List[SentimentExample], feat_extractor: FeatureE
     :param feat_extractor: feature extractor to use
     :return: trained PerceptronClassifier model
     """
-    raise Exception("Must be implemented")
+    examples = _training_features(train_exs, feat_extractor)
+    weights = Counter()
+    totals = Counter()
+    timestamps = Counter()
+    rng = random.Random(0)
+    step = 0
+    for epoch in range(20):
+        rng.shuffle(examples)
+        for features, label in examples:
+            score = sum(weights[index] * value for index, value in features.items())
+            error = label - int(score >= 0.0)
+            if error:
+                for index, value in features.items():
+                    # Lazy averaging counts unchanged weights between updates.
+                    totals[index] += (step - timestamps[index]) * weights[index]
+                    timestamps[index] = step
+                    weights[index] += error * value
+            step += 1
+    averaged = {index: (totals[index] + (step - timestamps[index]) * weight) / step
+                for index, weight in weights.items()}
+    bias = averaged.pop(-1, 0.0)
+    return PerceptronClassifier(averaged, feat_extractor, bias)
 
 
 def train_logistic_regression(train_exs: List[SentimentExample], feat_extractor: FeatureExtractor) -> LogisticRegressionClassifier:
@@ -107,7 +182,25 @@ def train_logistic_regression(train_exs: List[SentimentExample], feat_extractor:
     :param feat_extractor: feature extractor to use
     :return: trained LogisticRegressionClassifier model
     """
-    raise Exception("Must be implemented")
+    examples = _training_features(train_exs, feat_extractor)
+    weights = Counter()
+    rng = random.Random(0)
+    for epoch in range(25):
+        rng.shuffle(examples)
+        learning_rate = 0.15 / (1.0 + 0.1 * epoch)
+        for features, label in examples:
+            score = sum(weights[index] * value for index, value in features.items())
+            # This form avoids overflow for either sign of the score.
+            if score >= 0.0:
+                probability = 1.0 / (1.0 + math.exp(-score))
+            else:
+                exp_score = math.exp(score)
+                probability = exp_score / (1.0 + exp_score)
+            update = learning_rate * (label - probability)
+            for index, value in features.items():
+                weights[index] += update * value
+    bias = weights.pop(-1, 0.0)
+    return LogisticRegressionClassifier(weights, feat_extractor, bias)
 
 
 def train_model(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample]) -> SentimentClassifier:
