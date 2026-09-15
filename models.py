@@ -1,3 +1,4 @@
+# google collab auto code generator utilized for assisting with implementing the functions 
 # models.py
 
 from sentiment_data import *
